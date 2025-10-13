@@ -3,5 +3,8 @@
 !.gitignore
 !*.md
 !LICENSE
+!*.sh
+!.github/workflows/*.yml
 !*.go
-
+!go.mod
+!go.sum
