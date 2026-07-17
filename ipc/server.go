@@ -3,13 +3,18 @@ package ipc
 import (
 	"context"
 	"encoding/gob"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"os"
 	"sync"
+	"syscall"
 	"time"
 )
+
+// ErrAddressInUse reports that another server is already listening on the address.
+var ErrAddressInUse = errors.New("address already in use")
 
 // Server read and write timeouts.
 const (
@@ -29,12 +34,10 @@ type SocketServer[T, R any] struct {
 
 // NewServer creates a new socket server instance listening on the provided address.
 // The server will offload received messages to the handler for processing.
-func NewServer[T, R any](address string, handler MessageHandler[T, R]) *SocketServer[T, R] {
-	_ = os.Remove(address)
-
-	l, err := net.Listen("unix", address)
+func NewServer[T, R any](address string, handler MessageHandler[T, R]) (*SocketServer[T, R], error) {
+	l, err := listenUnix(address)
 	if err != nil {
-		panic(fmt.Errorf("unix socket listen: %w", err))
+		return nil, err
 	}
 
 	return &SocketServer[T, R]{
@@ -45,7 +48,41 @@ func NewServer[T, R any](address string, handler MessageHandler[T, R]) *SocketSe
 		ready:        make(chan struct{}),
 		readTimeout:  defaultReadTimeout,
 		writeTimeout: defaultWriteTimeout,
+	}, nil
+}
+
+// listenUnix binds a unix socket. Stale sockets are reclaimed.
+// If a server is listening on it returns an ErrAddressInUse.
+func listenUnix(address string) (net.Listener, error) {
+	l, err := net.Listen("unix", address)
+	if err == nil {
+		return l, nil
 	}
+	if !errors.Is(err, syscall.EADDRINUSE) {
+		return nil, fmt.Errorf("unix socket listen: %w", err)
+	}
+
+	if canDial(address) {
+		return nil, fmt.Errorf("%w: %s", ErrAddressInUse, address)
+	}
+
+	// The socket file is stale. Remove and retry.
+	_ = os.Remove(address)
+	l, err = net.Listen("unix", address)
+	if err != nil {
+		return nil, fmt.Errorf("unix socket listen: %w", err)
+	}
+	return l, nil
+}
+
+// canDial reports whether a server is currently listening on the address.
+func canDial(address string) bool {
+	conn, err := net.DialTimeout("unix", address, 100*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
 }
 
 // Run starts the server and blocks until the context is cancelled.
