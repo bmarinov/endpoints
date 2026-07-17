@@ -21,7 +21,10 @@ func startServer[T, R any](t *testing.T, handler MessageHandler[T, R], opts ...f
 	addr := filepath.Join(t.TempDir(), "s.sock")
 	ctx, cancel := context.WithCancel(t.Context())
 
-	srv := NewServer(addr, handler)
+	srv, err := NewServer(addr, handler)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, opt := range opts {
 		opt(srv)
 	}
@@ -294,6 +297,60 @@ func TestServer(t *testing.T) {
 		defer mu.Unlock()
 		if called {
 			t.Error("expected undecodable request to skip the handler, ran it on a zero value")
+		}
+	})
+}
+
+func TestNewServer(t *testing.T) {
+	noop := HandlerFunc[string, string](func(string) (string, error) { return "", nil })
+
+	t.Run("address in use", func(t *testing.T) {
+		addr := startServer(t, noop)
+
+		_, err := NewServer(addr, noop)
+		if err == nil {
+			t.Fatal("expected error binding an address a live server holds, got success")
+		}
+		if !errors.Is(err, ErrAddressInUse) {
+			t.Errorf("expected sentinel error, got %v", err)
+		}
+	})
+
+	t.Run("stale socket reclaimed", func(t *testing.T) {
+		addr := filepath.Join(t.TempDir(), "s.sock")
+
+		l, err := net.Listen("unix", addr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		l.(*net.UnixListener).SetUnlinkOnClose(false)
+		if err := l.Close(); err != nil {
+			t.Fatal(err)
+		}
+
+		srv, err := NewServer(addr, HandlerFunc[string, string](func(msg string) (string, error) {
+			return msg + "pong", nil
+		}))
+		if err != nil {
+			t.Fatalf("expected stale socket to be reclaimed, got %v", err)
+		}
+
+		ctx, cancel := context.WithCancel(t.Context())
+		var wg sync.WaitGroup
+		wg.Go(func() {
+			if err := srv.Run(ctx); err != nil {
+				t.Error(err)
+			}
+		})
+		t.Cleanup(func() { cancel(); wg.Wait() })
+		<-srv.ready
+
+		result, err := Send[string, string](t.Context(), "ping", addr)
+		if err != nil {
+			t.Fatalf("expected reclaimed server to serve, got %v", err)
+		}
+		if result != "pingpong" {
+			t.Errorf("expected 'pingpong' got '%s'", result)
 		}
 	})
 }
