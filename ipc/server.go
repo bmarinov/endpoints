@@ -11,12 +11,20 @@ import (
 	"time"
 )
 
+// Server read and write timeouts.
+const (
+	defaultReadTimeout  = 10 * time.Second
+	defaultWriteTimeout = 10 * time.Second
+)
+
 type SocketServer[T, R any] struct {
-	addr     string
-	listener net.Listener
-	wg       sync.WaitGroup
-	handler  MessageHandler[T, R]
-	ready    chan struct{}
+	addr         string
+	listener     net.Listener
+	wg           sync.WaitGroup
+	handler      MessageHandler[T, R]
+	ready        chan struct{}
+	readTimeout  time.Duration
+	writeTimeout time.Duration
 }
 
 // NewServer creates a new socket server instance listening on the provided address.
@@ -30,11 +38,13 @@ func NewServer[T, R any](address string, handler MessageHandler[T, R]) *SocketSe
 	}
 
 	return &SocketServer[T, R]{
-		addr:     address,
-		listener: l,
-		wg:       sync.WaitGroup{},
-		handler:  handler,
-		ready:    make(chan struct{}),
+		addr:         address,
+		listener:     l,
+		wg:           sync.WaitGroup{},
+		handler:      handler,
+		ready:        make(chan struct{}),
+		readTimeout:  defaultReadTimeout,
+		writeTimeout: defaultWriteTimeout,
 	}
 }
 
@@ -77,29 +87,43 @@ func (s *SocketServer[T, R]) listen(ctx context.Context) {
 }
 
 func (s *SocketServer[T, R]) handle(conn net.Conn) {
-	defer conn.Close()
-	conn.SetDeadline(time.Now().Add(1 * time.Second))
+	defer func() {
+		_ = conn.Close()
+	}()
+
+	_ = conn.SetReadDeadline(time.Now().Add(s.readTimeout))
 
 	decoder := gob.NewDecoder(conn)
 	var req T
-	err := decoder.Decode(&req)
-	if err != nil {
+	if err := decoder.Decode(&req); err != nil {
 		slog.Error("message decode", "err", err)
+		return
 	}
 
-	result, err := s.handler.Handle(req)
+	response := s.invoke(req)
 
-	var response envelope[R]
-	encoder := gob.NewEncoder(conn)
+	_ = conn.SetWriteDeadline(time.Now().Add(s.writeTimeout))
 
-	if err != nil {
-		response = envelope[R]{ErrorMsg: err.Error()}
-	} else {
-		response = envelope[R]{Payload: result}
-	}
-
-	encoder.Encode(response)
-	if err != nil {
+	if err := gob.NewEncoder(conn).Encode(response); err != nil {
 		slog.Error("sending response to client", "err", err)
 	}
+}
+
+// invoke calls the handler and returns a response.
+//
+// A handler panic is returned as an error response.
+func (s *SocketServer[T, R]) invoke(req T) (response envelope[R]) {
+	defer func() {
+		if p := recover(); p != nil {
+			slog.Error("handler panic", "panic", p)
+			response = envelope[R]{ErrorMsg: fmt.Sprintf("handler panic: %v", p)}
+		}
+	}()
+
+	result, err := s.handler.Handle(req)
+	if err != nil {
+		return envelope[R]{ErrorMsg: err.Error()}
+	}
+
+	return envelope[R]{Payload: result}
 }
