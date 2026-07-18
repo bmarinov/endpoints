@@ -290,7 +290,9 @@ func TestServer(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer conn.Close()
+		defer func() {
+			_ = conn.Close()
+		}()
 
 		if _, err := conn.Write([]byte("this is not gob\n")); err != nil {
 			t.Fatal(err)

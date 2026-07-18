@@ -56,7 +56,9 @@ func SendConn[T, R any](ctx context.Context, msg T, dial DialFunc) (R, error) {
 		return result, fmt.Errorf("failed to connect: %w", err)
 	}
 
-	defer conn.Close()
+	defer func() {
+		_ = conn.Close()
+	}()
 
 	// Report ctx.Err() instead of the I/O error on cancel:
 	done := make(chan struct{})
