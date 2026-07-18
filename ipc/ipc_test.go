@@ -28,7 +28,7 @@ func startServer[T, R any](t *testing.T, handler MessageHandler[T, R], opts ...S
 }
 
 // runServer runs srv in the background and returns once it is ready.
-func runServer[T, R any](t *testing.T, srv *SocketServer[T, R]) {
+func runServer[T, R any](t *testing.T, srv *Server[T, R]) {
 	t.Helper()
 
 	ctx, cancel := context.WithCancel(t.Context())

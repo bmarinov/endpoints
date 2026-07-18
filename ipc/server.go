@@ -22,7 +22,7 @@ const (
 	defaultWriteTimeout = 10 * time.Second
 )
 
-type SocketServer[T, R any] struct {
+type Server[T, R any] struct {
 	listener     net.Listener
 	wg           sync.WaitGroup
 	handler      MessageHandler[T, R]
@@ -56,7 +56,7 @@ func NewServer[T, R any](
 	address string,
 	handler MessageHandler[T, R],
 	opts ...ServerOption,
-) (*SocketServer[T, R], error) {
+) (*Server[T, R], error) {
 	l, err := listenUnix(address)
 	if err != nil {
 		return nil, err
@@ -69,7 +69,7 @@ func NewServer[T, R any](
 //
 // The caller must close the listener.
 // Socket files not created by the server will not be removed.
-func NewServerWithListener[T, R any](l net.Listener, handler MessageHandler[T, R], opts ...ServerOption) *SocketServer[T, R] {
+func NewServerWithListener[T, R any](l net.Listener, handler MessageHandler[T, R], opts ...ServerOption) *Server[T, R] {
 	cfg := serverConfig{
 		readTimeout:  defaultReadTimeout,
 		writeTimeout: defaultWriteTimeout,
@@ -78,7 +78,7 @@ func NewServerWithListener[T, R any](l net.Listener, handler MessageHandler[T, R
 		opt(&cfg)
 	}
 
-	return &SocketServer[T, R]{
+	return &Server[T, R]{
 		listener:     l,
 		handler:      handler,
 		ready:        make(chan struct{}),
@@ -122,7 +122,7 @@ func canDial(address string) bool {
 }
 
 // Run starts the server and blocks until the context is cancelled.
-func (s *SocketServer[T, R]) Run(ctx context.Context) error {
+func (s *Server[T, R]) Run(ctx context.Context) error {
 	go s.listen(ctx)
 
 	<-ctx.Done()
@@ -131,12 +131,12 @@ func (s *SocketServer[T, R]) Run(ctx context.Context) error {
 	return nil
 }
 
-func (s *SocketServer[T, R]) stop() {
+func (s *Server[T, R]) stop() {
 	_ = s.listener.Close()
 	s.wg.Wait()
 }
 
-func (s *SocketServer[T, R]) listen(ctx context.Context) {
+func (s *Server[T, R]) listen(ctx context.Context) {
 	close(s.ready)
 	for {
 		conn, err := s.listener.Accept()
@@ -158,7 +158,7 @@ func (s *SocketServer[T, R]) listen(ctx context.Context) {
 	}
 }
 
-func (s *SocketServer[T, R]) handle(conn net.Conn) {
+func (s *Server[T, R]) handle(conn net.Conn) {
 	defer func() {
 		_ = conn.Close()
 	}()
@@ -184,7 +184,7 @@ func (s *SocketServer[T, R]) handle(conn net.Conn) {
 // invoke calls the handler and returns a response.
 //
 // A handler panic is returned as an error response.
-func (s *SocketServer[T, R]) invoke(req T) (response envelope[R]) {
+func (s *Server[T, R]) invoke(req T) (response envelope[R]) {
 	defer func() {
 		if p := recover(); p != nil {
 			slog.Error("handler panic", "panic", p)
