@@ -10,8 +10,8 @@ import (
 	"github.com/bmarinov/endpoints/ipc"
 )
 
-// ExampleNewServer shows the complete round trip.
-// start a server, then send a message and read the response.
+// This is the complete round trip.
+// Start a server, then send a message and read the response.
 func ExampleNewServer() {
 	handler := ipc.HandlerFunc[string, string](func(msg string) (string, error) {
 		return "pong", nil
@@ -43,7 +43,7 @@ func ExampleNewServer() {
 	<-done
 }
 
-// ExampleSend assumes a server is already listening on addr.
+// ipc.Send assumes that a server is already listening on addr.
 func ExampleSend() {
 	const addr = "/tmp/foobarsock"
 
@@ -56,8 +56,7 @@ func ExampleSend() {
 	slog.Info("received response", "message", response)
 }
 
-// ExampleSendConn sends over a transport other than
-// the default unix socket dialer.
+// Send over a transport other than the default unix socket dialer.
 func ExampleSendConn() {
 	handler := ipc.HandlerFunc[string, string](func(msg string) (string, error) {
 		return "pong", nil
