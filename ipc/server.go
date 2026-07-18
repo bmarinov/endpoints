@@ -23,7 +23,6 @@ const (
 )
 
 type SocketServer[T, R any] struct {
-	addr         string
 	listener     net.Listener
 	wg           sync.WaitGroup
 	handler      MessageHandler[T, R]
@@ -32,23 +31,60 @@ type SocketServer[T, R any] struct {
 	writeTimeout time.Duration
 }
 
-// NewServer creates a new socket server instance listening on the provided address.
+// ServerOption configures optional server behaviour.
+type ServerOption func(*serverConfig)
+
+type serverConfig struct {
+	readTimeout  time.Duration
+	writeTimeout time.Duration
+}
+
+// WithReadTimeout sets the deadline for Read calls.
+func WithReadTimeout(d time.Duration) ServerOption {
+	return func(c *serverConfig) { c.readTimeout = d }
+}
+
+// WithWriteTimeout limits the response write.
+func WithWriteTimeout(d time.Duration) ServerOption {
+	return func(c *serverConfig) { c.writeTimeout = d }
+}
+
+// NewServer creates a server that owns a unix socket at address.
 // The server will offload received messages to the handler for processing.
-func NewServer[T, R any](address string, handler MessageHandler[T, R]) (*SocketServer[T, R], error) {
+// Stale socket files will be reclaimed.
+func NewServer[T, R any](
+	address string,
+	handler MessageHandler[T, R],
+	opts ...ServerOption,
+) (*SocketServer[T, R], error) {
 	l, err := listenUnix(address)
 	if err != nil {
 		return nil, err
 	}
 
-	return &SocketServer[T, R]{
-		addr:         address,
-		listener:     l,
-		wg:           sync.WaitGroup{},
-		handler:      handler,
-		ready:        make(chan struct{}),
+	return NewServerWithListener(l, handler, opts...), nil
+}
+
+// NewServerWithListener serves on a provided listener.
+//
+// The caller must close the listener.
+// Socket files not created by the server will not be removed.
+func NewServerWithListener[T, R any](l net.Listener, handler MessageHandler[T, R], opts ...ServerOption) *SocketServer[T, R] {
+	cfg := serverConfig{
 		readTimeout:  defaultReadTimeout,
 		writeTimeout: defaultWriteTimeout,
-	}, nil
+	}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+
+	return &SocketServer[T, R]{
+		listener:     l,
+		handler:      handler,
+		ready:        make(chan struct{}),
+		readTimeout:  cfg.readTimeout,
+		writeTimeout: cfg.writeTimeout,
+	}
 }
 
 // listenUnix binds a unix socket. Stale sockets are reclaimed.
@@ -97,7 +133,6 @@ func (s *SocketServer[T, R]) Run(ctx context.Context) error {
 
 func (s *SocketServer[T, R]) stop() {
 	_ = s.listener.Close()
-	_ = os.Remove(s.addr)
 	s.wg.Wait()
 }
 

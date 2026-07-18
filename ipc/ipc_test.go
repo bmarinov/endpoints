@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"net"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -13,36 +14,47 @@ import (
 	"time"
 )
 
-// startServer runs a server on a fresh socket and returns its address.
-// The server is stopped when the test ends.
-func startServer[T, R any](t *testing.T, handler MessageHandler[T, R], opts ...func(*SocketServer[T, R])) string {
+// startServer runs a server on a fresh unix socket and returns its address.
+func startServer[T, R any](t *testing.T, handler MessageHandler[T, R], opts ...ServerOption) string {
 	t.Helper()
 
 	addr := filepath.Join(t.TempDir(), "s.sock")
-	ctx, cancel := context.WithCancel(t.Context())
-
-	srv, err := NewServer(addr, handler)
+	srv, err := NewServer(addr, handler, opts...)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, opt := range opts {
-		opt(srv)
-	}
+	runServer(t, srv)
+	return addr
+}
 
+// runServer runs srv in the background and returns once it is ready.
+func runServer[T, R any](t *testing.T, srv *SocketServer[T, R]) {
+	t.Helper()
+
+	ctx, cancel := context.WithCancel(t.Context())
 	var wg sync.WaitGroup
 	wg.Go(func() {
 		if err := srv.Run(ctx); err != nil {
 			t.Error(err)
 		}
 	})
-
 	t.Cleanup(func() {
 		cancel()
 		wg.Wait()
 	})
-
 	<-srv.ready
-	return addr
+}
+
+// blockingHandler blocks until release is closed.
+// The upper limit for the reply is two seconds.
+func blockingHandler(release <-chan struct{}, reply string) HandlerFunc[string, string] {
+	return func(string) (string, error) {
+		select {
+		case <-release:
+		case <-time.After(2 * time.Second):
+		}
+		return reply, nil
+	}
 }
 
 func TestSend(t *testing.T) {
@@ -133,9 +145,9 @@ func TestSend(t *testing.T) {
 	})
 
 	t.Run("slow handler", func(t *testing.T) {
-		// broken on v0.1.0 with the enforced 1s deadline on the whole exchange.
+		t.Parallel()
 		addr := startServer(t, HandlerFunc[string, string](func(string) (string, error) {
-			time.Sleep(1200 * time.Millisecond)
+			time.Sleep(500 * time.Millisecond)
 			return "slow but done", nil
 		}))
 
@@ -152,10 +164,10 @@ func TestSend(t *testing.T) {
 	})
 
 	t.Run("caller deadline", func(t *testing.T) {
-		addr := startServer(t, HandlerFunc[string, string](func(string) (string, error) {
-			time.Sleep(2 * time.Second)
-			return "too late", nil
-		}))
+		t.Parallel()
+		release := make(chan struct{})
+		defer close(release)
+		addr := startServer(t, blockingHandler(release, "too late"))
 
 		ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
 		defer cancel()
@@ -174,10 +186,10 @@ func TestSend(t *testing.T) {
 	})
 
 	t.Run("caller cancellation", func(t *testing.T) {
-		addr := startServer(t, HandlerFunc[string, string](func(string) (string, error) {
-			time.Sleep(2 * time.Second)
-			return "too late", nil
-		}))
+		t.Parallel()
+		release := make(chan struct{})
+		defer close(release)
+		addr := startServer(t, blockingHandler(release, "too late"))
 
 		ctx, cancel := context.WithCancel(t.Context())
 		go func() {
@@ -251,7 +263,7 @@ func TestServer(t *testing.T) {
 				time.Sleep(200 * time.Millisecond)
 				return "done", nil
 			}),
-			func(s *SocketServer[string, string]) { s.writeTimeout = 50 * time.Millisecond },
+			WithWriteTimeout(50*time.Millisecond),
 		)
 
 		result, err := Send[string, string](t.Context(), "hi", addr)
@@ -334,16 +346,7 @@ func TestNewServer(t *testing.T) {
 		if err != nil {
 			t.Fatalf("expected stale socket to be reclaimed, got %v", err)
 		}
-
-		ctx, cancel := context.WithCancel(t.Context())
-		var wg sync.WaitGroup
-		wg.Go(func() {
-			if err := srv.Run(ctx); err != nil {
-				t.Error(err)
-			}
-		})
-		t.Cleanup(func() { cancel(); wg.Wait() })
-		<-srv.ready
+		runServer(t, srv)
 
 		result, err := Send[string, string](t.Context(), "ping", addr)
 		if err != nil {
@@ -351,6 +354,85 @@ func TestNewServer(t *testing.T) {
 		}
 		if result != "pingpong" {
 			t.Errorf("expected 'pingpong' got '%s'", result)
+		}
+	})
+
+	t.Run("owned socket removed on stop", func(t *testing.T) {
+		addr := filepath.Join(t.TempDir(), "s.sock")
+
+		srv, err := NewServer(addr, noop)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		var wg sync.WaitGroup
+		wg.Go(func() {
+			if err := srv.Run(ctx); err != nil {
+				t.Error(err)
+			}
+		})
+		<-srv.ready
+		cancel()
+		wg.Wait()
+
+		if _, err := os.Stat(addr); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("expected owned socket to be removed on stop, got %v", err)
+		}
+	})
+}
+
+func TestListenerAndDialer(t *testing.T) {
+	t.Run("tcp round trip", func(t *testing.T) {
+		l, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		srv := NewServerWithListener(l, HandlerFunc[string, string](func(msg string) (string, error) {
+			return msg + "pong", nil
+		}))
+		runServer(t, srv)
+
+		addr := l.Addr().String()
+		result, err := SendConn[string, string](t.Context(), "ping", func(ctx context.Context) (net.Conn, error) {
+			var dialer net.Dialer
+			return dialer.DialContext(ctx, "tcp", addr)
+		})
+		if err != nil {
+			t.Fatalf("expected round trip over a caller-supplied tcp listener and dialer, got %v", err)
+		}
+		if result != "pingpong" {
+			t.Errorf("expected 'pingpong' got '%s'", result)
+		}
+	})
+
+	t.Run("caller socket survives server stop", func(t *testing.T) {
+		addr := filepath.Join(t.TempDir(), "s.sock")
+
+		l, err := net.Listen("unix", addr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		l.(*net.UnixListener).SetUnlinkOnClose(false)
+
+		srv := NewServerWithListener(l, HandlerFunc[string, string](func(string) (string, error) {
+			return "ok", nil
+		}))
+
+		ctx, cancel := context.WithCancel(context.Background())
+		var wg sync.WaitGroup
+		wg.Go(func() {
+			if err := srv.Run(ctx); err != nil {
+				t.Error(err)
+			}
+		})
+		<-srv.ready
+		cancel()
+		wg.Wait()
+
+		if _, err := os.Stat(addr); err != nil {
+			t.Errorf("expected server to leave a caller-owned socket in place, got %v", err)
 		}
 	})
 }
