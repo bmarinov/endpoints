@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"time"
 
 	"github.com/bmarinov/endpoints/ipc"
 )
@@ -18,7 +19,12 @@ func ExampleNewServer() {
 	})
 
 	const addr = "/tmp/foobarsock"
-	srv, err := ipc.NewServer(addr, handler)
+	srv, err := ipc.NewServer(
+		addr,
+		handler,
+		ipc.WithReadTimeout(3*time.Second),
+		ipc.WithWriteTimeout(4*time.Second),
+	)
 	if err != nil {
 		slog.Error("new server", "err", err)
 		os.Exit(1)
