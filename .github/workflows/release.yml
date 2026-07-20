@@ -12,22 +12,11 @@ jobs:
 
     permissions:
       contents: write
-      packages: write
 
     steps:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
-
-      - name: Get version
-        id: version
-        run: |
-          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
-            VERSION=${GITHUB_REF#refs/tags/}
-          else
-            VERSION=$(git describe --tags --always --dirty)
-          fi
-          echo "VERSION=${VERSION}" >> $GITHUB_OUTPUT
 
       - name: Create release
         uses: softprops/action-gh-release@v2
@@ -35,8 +24,6 @@ jobs:
         with:
           draft: true
           generate_release_notes: true
-          files: |
-            crds-${{ steps.version.outputs.VERSION }}.yaml
           body: |
 
             ## Changes
