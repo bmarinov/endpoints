@@ -49,7 +49,11 @@ func ExampleNewServer() {
 	<-done
 }
 
-// ipc.Send assumes that a server is already listening on addr.
+// This showcases the client side on its own. Assumes a server
+// listening on addr.
+//
+// When running standalone e.g. on pkg.go.dev it will
+// exit with [ErrServerNotRunning].
 func ExampleSend() {
 	const addr = "/tmp/foobarsock"
 
@@ -82,6 +86,7 @@ func ExampleSendConn() {
 		_ = srv.Run(ctx)
 		close(done)
 	}()
+	time.Sleep(10 * time.Millisecond) // let the server start accepting (Go playground)
 
 	dial := func(ctx context.Context) (net.Conn, error) {
 		var d net.Dialer
